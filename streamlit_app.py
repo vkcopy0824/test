@@ -9,14 +9,30 @@ from typing import List
 
 st.set_page_config(layout="wide", page_title="NIFTY50 Market Breadth (20d)")
 
-# ---------------- Config ----------------
+# --------------- Config ----------------
+# Public proxy used only for adv/dec fetch (can be overridden in Secrets or UI)
 DEFAULT_PROXY_BASE = "https://nse-api-proxy.vercel.app"
-# local uploaded image path (provided earlier)
+
+# Local image path (user-uploaded) — developer provided this path and we use it as-is.
 SAMPLE_IMAGE_PATH = "/mnt/data/IMG_1890.JPG"
+
+# History window in days (as requested)
 HIST_DAYS = 20
 YF_CHUNK = 25
 
-# ---------------- Helpers ----------------
+# --------------- Static NIFTY50 list (plain symbols) ---------------
+# These are plain NSE symbols — the code will append '.NS' for yfinance lookups.
+NIFTY50_SYMBOLS = [
+    "RELIANCE","TCS","HDFCBANK","HDFC","ICICIBANK","INFY","ITC","KOTAKBANK","LT","SBIN",
+    "BHARTIARTL","AXISBANK","HINDUNILVR","BAJAJFINANCE","MARUTI","ASIANPAINT","NTPC","ONGC","POWERGRID","SUNPHARMA",
+    "NESTLEIND","TITAN","UPL","M&M","WIPRO","GRASIM","DIVISLAB","BAJAJ-AUTO","TECHM","HCLTECH",
+    "EICHERMOT","INDUSINDBK","BRITANNIA","ADANIENT","ADANIPORTS","COALINDIA","JSWSTEEL","IOC","LTIM","SHREECEM",
+    "SBILIFE","HINDALCO","ULTRACEMCO","VEDL","CIPLA","ICICIGI","TATASTEEL","POWERHOUSE","BANDHANBNK","PEL"
+]
+
+# Note: above list aims to be a representative, up-to-date list — replace any symbols you prefer.
+
+# --------------- Helpers ----------------
 def get_proxy_base():
     pb = None
     try:
@@ -29,7 +45,7 @@ def get_proxy_base():
 
 def proxy_get(path: str, timeout: int = 10):
     """
-    Call the proxy: path must include leading '/' and any query string, e.g. '/nifty50' or '/adv-dec?index=NIFTY%2050'
+    GET to proxy. Example path: '/adv-dec?index=NIFTY%2050'
     """
     base = get_proxy_base()
     url = base + path
@@ -48,35 +64,13 @@ def proxy_get(path: str, timeout: int = 10):
 
 @st.cache_data(ttl=30)
 def fetch_breadth_proxy():
-    # Adv/Decl endpoint (proxy)
+    # public proxy adv/dec endpoint (works with the public proxy we discussed)
     return proxy_get("/adv-dec?index=NIFTY%2050")
-
-@st.cache_data(ttl=300)
-def fetch_nifty50_via_proxy():
-    # NIFTY50 constituents endpoint (proxy)
-    j = proxy_get("/nifty50")
-    if not j:
-        return None
-    symbols = []
-    # j is expected to be list of dicts with 'symbol' key
-    try:
-        for it in j:
-            if isinstance(it, dict):
-                sym = it.get("symbol") or it.get("tradingsymbol") or it.get("symbolName") or it.get("name")
-            else:
-                sym = None
-            if not sym:
-                continue
-            yf_sym = sym if sym.endswith(".NS") else f"{sym}.NS"
-            symbols.append((sym, yf_sym))
-    except Exception:
-        return None
-    return symbols
 
 @st.cache_data(ttl=300)
 def fetch_histories_yf(tickers: List[str], days: int = HIST_DAYS):
     """
-    Download recent history for tickers via yfinance.
+    Download history for tickers using yfinance.
     Returns dict ticker -> DataFrame
     """
     end = datetime.now().date()
@@ -119,7 +113,7 @@ def fetch_histories_yf(tickers: List[str], days: int = HIST_DAYS):
 
 def analyze_history_df(h: pd.DataFrame):
     """
-    Input DataFrame with 'Close' column. Compute metrics and DMAs (Close-based).
+    Compute last_close, prev_close, DMAs (close-based), flags, daily % and % over window
     """
     if h is None or h.empty or 'Close' not in h.columns:
         return None
@@ -136,7 +130,7 @@ def analyze_history_df(h: pd.DataFrame):
     res['above_20'] = int(not np.isnan(res['dma20']) and res['last_close'] > res['dma20'])
     res['above_40'] = int(not np.isnan(res['dma40']) and res['last_close'] > res['dma40'])
     res['last_day_pct'] = ((res['last_close'] - res['prev_close']) / res['prev_close'] * 100) if res['prev_close'] != 0 else 0.0
-    # pct over HIST_DAYS window (from earliest available within window to last)
+    # pct over HIST_DAYS window (earliest available within window)
     if len(close) >= HIST_DAYS:
         earliest = float(close.iloc[-HIST_DAYS])
     else:
@@ -144,10 +138,10 @@ def analyze_history_df(h: pd.DataFrame):
     res['pct_over_window'] = ((res['last_close'] - earliest) / earliest * 100) if earliest != 0 else np.nan
     return res
 
-# ---------------- UI ----------------
-st.title("📈 NIFTY50 Market Breadth Dashboard — 20-day window (stock-level breadth)")
+# --------------- UI ----------------
+st.title("📈 NIFTY50 Market Breadth Dashboard — 20-day window (static constituents)")
 
-# Top row: proxy config, live breadth, sample image
+# Top row: proxy input, live breadth, sample image
 col1, col2, col3 = st.columns([2, 2, 1])
 with col1:
     st.subheader("Proxy")
@@ -156,7 +150,7 @@ with col1:
     if st.button("Apply Proxy Override"):
         st.session_state["PROXY_BASE_OVERRIDE"] = proxy_input.strip()
         st.experimental_rerun()
-    st.caption("Set PROXY_BASE in Streamlit Secrets or use UI override. Default: public proxy.")
+    st.caption("Set PROXY_BASE in Streamlit Secrets to avoid exposing it in UI.")
 
 with col2:
     st.subheader("NSE Live Breadth (proxy)")
@@ -180,34 +174,26 @@ with col3:
 
 st.markdown("---")
 
-# Fetch NIFTY50 constituents from proxy
-st.subheader("Constituents (fetched via proxy)")
-symbols = fetch_nifty50_via_proxy()
-if not symbols:
-    st.warning("Could not fetch NIFTY50 from proxy. Falling back to a small default list.")
-    fallback = ["RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK"]
-    symbols = [(s, f"{s}.NS") for s in fallback]
+# Build tickers for yfinance
+symbols = NIFTY50_SYMBOLS
+tickers_yf = [s + ".NS" for s in symbols]
 
-st.write(f"{len(symbols)} symbols found. Fetching {HIST_DAYS} days history for each via yfinance (may take ~30–90s).")
+st.write(f"Using static list with {len(tickers_yf)} tickers. Fetching {HIST_DAYS} days history for each via yfinance (may take ~30–90s).")
 
-tickers_yf = [yf for (_, yf) in symbols]
 histories = fetch_histories_yf(tickers_yf, days=HIST_DAYS)
 
-# Build table rows
 rows = []
-for orig_sym, yf_sym in symbols:
+for sym, yf_sym in zip(symbols, tickers_yf):
     h = histories.get(yf_sym, pd.DataFrame())
     info = analyze_history_df(h)
     if info is None:
         rows.append({
-            "Symbol": orig_sym,
+            "Symbol": sym,
             "Ticker": yf_sym,
             "Close": np.nan,
-            "Advances": np.nan,
-            "Declines": np.nan,
-            "%Above10DMA": np.nan,
-            "%Above20DMA": np.nan,
-            "%Above40DMA": np.nan,
+            "%Above10": np.nan,
+            "%Above20": np.nan,
+            "%Above40": np.nan,
             "Up4": 0,
             "Down4": 0,
             "Up25": 0,
@@ -219,53 +205,38 @@ for orig_sym, yf_sym in symbols:
         last = info['last_close']
         day_pct = info['last_day_pct']
         window_pct = info['pct_over_window']
-        above10 = info['above_10']
-        above20 = info['above_20']
-        above40 = info['above_40']
-        up4 = 1 if day_pct > 4 else 0
-        down4 = 1 if day_pct < -4 else 0
-        up25 = 1 if (not np.isnan(window_pct) and window_pct > 25) else 0
-        down25 = 1 if (not np.isnan(window_pct) and window_pct < -25) else 0
-        up50 = 1 if (not np.isnan(window_pct) and window_pct > 50) else 0
-        down50 = 1 if (not np.isnan(window_pct) and window_pct < -50) else 0
-
         rows.append({
-            "Symbol": orig_sym,
+            "Symbol": sym,
             "Ticker": yf_sym,
             "Close": last,
-            "Advances": np.nan,   # per-stock advances/declines not provided by proxy; per-stock calc below uses day pct
-            "Declines": np.nan,
-            "%Above10DMA": above10,
-            "%Above20DMA": above20,
-            "%Above40DMA": above40,
-            "Up4": up4,
-            "Down4": down4,
-            "Up25": up25,
-            "Down25": down25,
-            "Up50": up50,
-            "Down50": down50
+            "%Above10": info['above_10'],
+            "%Above20": info['above_20'],
+            "%Above40": info['above_40'],
+            "Up4": 1 if day_pct > 4 else 0,
+            "Down4": 1 if day_pct < -4 else 0,
+            "Up25": 1 if (not np.isnan(window_pct) and window_pct > 25) else 0,
+            "Down25": 1 if (not np.isnan(window_pct) and window_pct < -25) else 0,
+            "Up50": 1 if (not np.isnan(window_pct) and window_pct > 50) else 0,
+            "Down50": 1 if (not np.isnan(window_pct) and window_pct < -50) else 0
         })
 
 df = pd.DataFrame(rows)
 
-# Compute aggregates (stock-level)
+# Aggregates
 total = len(df)
-adv_calc = int((df["Up4"] == 1).sum())  # count of stocks up >4% (today)
-dec_calc = int((df["Down4"] == 1).sum())  # count down <-4% (today)
-pct_above_10 = df["%Above10DMA"].sum() / total * 100 if total else np.nan
-pct_above_20 = df["%Above20DMA"].sum() / total * 100 if total else np.nan
-pct_above_40 = df["%Above40DMA"].sum() / total * 100 if total else np.nan
 up4_total = int(df["Up4"].sum())
 down4_total = int(df["Down4"].sum())
+pct_above_10 = df["%Above10"].sum() / total * 100 if total else np.nan
+pct_above_20 = df["%Above20"].sum() / total * 100 if total else np.nan
+pct_above_40 = df["%Above40"].sum() / total * 100 if total else np.nan
 up25_total = int(df["Up25"].sum())
 down25_total = int(df["Down25"].sum())
 up50_total = int(df["Up50"].sum())
 down50_total = int(df["Down50"].sum())
 
-# Show top metrics
 c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.metric("Advances (>+4% stocks)", up4_total)
-c2.metric("Declines (<-4% stocks)", down4_total)
+c1.metric("Stocks > +4% (today)", up4_total)
+c2.metric("Stocks < -4% (today)", down4_total)
 c3.metric("% Above 10 DMA", f"{pct_above_10:.1f}%" if not np.isnan(pct_above_10) else "—")
 c4.metric("% Above 20 DMA", f"{pct_above_20:.1f}%" if not np.isnan(pct_above_20) else "—")
 c5.metric("Up 25% (20d)", up25_total)
@@ -273,33 +244,26 @@ c6.metric("Down 25% (20d)", down25_total)
 
 st.markdown("---")
 
-# Format and display table
-display_cols = ["Ticker", "Close", "Up4", "Down4", "Up25", "Down25", "Up50", "Down50", "%Above10DMA", "%Above20DMA", "%Above40DMA"]
+# Display table with heatmap coloring for flags
+display_cols = ["Ticker", "Close", "Up4", "Down4", "Up25", "Down25", "Up50", "Down50", "%Above10", "%Above20", "%Above40"]
 display_df = df.set_index("Symbol")[display_cols]
 
 def color_flag(v):
     if pd.isna(v):
         return ""
-    # for boolean flags 1 -> green, 0 -> pink
     if v == 1:
         return "background-color: #b6d7a8"
     if v == 0:
         return "background-color: #f4cccc"
     return ""
 
-styled = display_df.style.format({
-    "Close": "{:.2f}",
-    "%Above10DMA": "{:.0f}",
-    "%Above20DMA": "{:.0f}",
-    "%Above40DMA": "{:.0f}"
-}).applymap(color_flag, subset=["Up4","Down4","Up25","Down25","Up50","Down50","%Above10DMA","%Above20DMA","%Above40DMA"])
+styled = display_df.style.format({"Close": "{:.2f}"}).applymap(color_flag, subset=["Up4","Down4","Up25","Down25","Up50","Down50","%Above10","%Above20","%Above40"])
 
-st.subheader("Per-stock Breadth Table (heatmap)")
+st.subheader("Per-stock Breadth Table (static constituents)")
 st.dataframe(styled, use_container_width=True)
 
 st.markdown("---")
 st.subheader("Aggregate: % Above 20 DMA over recent days (sample)")
-# Build small aggregate series if histories available
 days_back = st.slider("Days to aggregate (max 20)", min_value=5, max_value=min(20, HIST_DAYS), value=min(10, HIST_DAYS))
 dates = pd.date_range(end=datetime.now(), periods=days_back)
 agg_rows = []
@@ -328,7 +292,7 @@ if not agg_df.empty:
     chart = alt.Chart(agg_df).mark_area(opacity=0.4).encode(x='date:T', y='pct_above20:Q').properties(height=300)
     st.altair_chart(chart, use_container_width=True)
 else:
-    st.info("Not enough historical data to compute aggregate trend for the requested window.")
+    st.info("Not enough data to compute aggregate trend for the requested window.")
 
 st.markdown("---")
-st.caption("Notes: DMAs are computed on Close prices. Up/Down 4% counts stocks with today % change >4% / <-4%. 25%/50% are computed over the configured 20-day window (increase HIST_DAYS if you want longer-term % changes).")
+st.caption("Notes: DMAs are computed on Close prices. Up/Down 4% counts stocks with today % change >4% / <-4%. 25%/50% are computed over the 20-day window (increase HIST_DAYS if you want longer-term % changes).")
