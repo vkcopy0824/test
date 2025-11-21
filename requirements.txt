@@ -1,0 +1,5 @@
+streamlit
+yfinance
+altair
+pandas
+numpy
